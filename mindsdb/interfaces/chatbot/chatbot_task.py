@@ -1,4 +1,5 @@
 import datetime as dt
+from collections import defaultdict
 
 from mindsdb_sql.parser.ast import Identifier, Select, Insert, BinaryOperation, Constant
 from mindsdb.interfaces.storage import db
@@ -59,6 +60,7 @@ class ChatBotTask:
                         for name, description in self.params['back_db']['config']['tools'].items()
                     ]
                     self.params['back_db']['tools'] = tools
+        self.chat_memory = defaultdict(dict)
 
     def run(self):
 
@@ -194,13 +196,23 @@ class ChatBotTask:
         ]
         context = '\n'.join(context_list)
 
+        intermediate_steps = None
+        if 'intermediate_steps' in self.chat_memory[chat_id]:
+            intermediate_steps = self.chat_memory[chat_id]['intermediate_steps']
+
         # call model
         predictions = self.project_datanode.predict(
             model_name=self.model_name,
             data=messages,
-            params={'tools': tools, 'context': context, 'max_iterations': 10}
+            params={'tools': tools, 'context': context,
+                    'max_iterations': 10, 'intermediate_steps': intermediate_steps}
         )
 
         output_col = self.params['model']['output']
         model_output = predictions.iloc[-1][output_col]
+
+        if self.params['model']['engine'] == 'langchain':
+            intermediate_steps_out = predictions.iloc[-1]['intermediate_steps']
+            self.chat_memory[chat_id]['intermediate_steps'] = intermediate_steps_out
+
         return model_output

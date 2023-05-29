@@ -15,6 +15,7 @@ from langchain.prompts import PromptTemplate
 from langchain.utilities import GoogleSerperAPIWrapper
 from langchain.agents.agent_toolkits import SQLDatabaseToolkit
 from langchain.chains.conversation.memory import ConversationSummaryMemory
+from langchain.output_parsers import RetryWithErrorOutputParser
 
 from mindsdb.integrations.handlers.openai_handler.openai_handler import OpenAIHandler, CHAT_MODELS
 from mindsdb.integrations.handlers.langchain_handler.mindsdb_database_agent import MindsDBSQL
@@ -143,15 +144,18 @@ class LangChainHandler(OpenAIHandler):
 
         llm = ChatOpenAI(**model_kwargs)
 
-        memory = ConversationBufferMemory(memory_key="chat_history")
+        memory = ConversationBufferMemory(memory_key="chat_history", output_key='output')
 
         # fill memory
 
         # system prompt
         prompt = args['prompt']
+        if 'prompt' in pred_args:
+            prompt = pred_args['prompt']
         if 'context' in pred_args:
             prompt += '\n\n' + 'Useful information:\n' + pred_args['context'] + '\n'
         memory.chat_memory.messages.insert(0, SystemMessage(content=prompt))
+        # memory.chat_memory.add_user_message(prompt)
 
         # user - assistant conversation. get all except the last message
         for row in df[:-1].to_dict('records'):
@@ -174,6 +178,7 @@ class LangChainHandler(OpenAIHandler):
             agent=agent_name,
             max_iterations=pred_args.get('max_iterations', 3),
             verbose=pred_args.get('verbose', args.get('verbose', False)),
+            return_intermediate_steps=True,
         )
 
         # setup model description
@@ -276,10 +281,22 @@ class LangChainHandler(OpenAIHandler):
         for i, row in df.iterrows():
             if i not in empty_prompt_ids:
                 prompt = PromptTemplate(input_variables=input_variables, template=base_template)
+                # prompt = PromptTemplate(
+                #     input_variables=input_variables,
+                #     template=base_template,
+                #     output_parser=RetryWithErrorOutputParser.from_llm(
+                #         agent.agent.llm_chain.llm,
+                #         agent.agent.output_parser
+                #     )
+                # )
                 kwargs = {}
                 for col in input_variables:
                     kwargs[col] = row[col] if row[col] is not None else ''  # add empty quote if data is missing
                 prompts.append(prompt.format(**kwargs))
+
+        intermediate_steps = None
+        if 'intermediate_steps' in pred_args:
+            intermediate_steps = pred_args['intermediate_steps']
 
         def _completion(agent, prompts):
             # TODO: ensure that agent completion plus prompt match the maximum allowed by the user
@@ -288,21 +305,23 @@ class LangChainHandler(OpenAIHandler):
             for prompt in prompts:
                 if not prompt:
                     # skip empty values
-                    completions.append('')
+                    completions.append(['', None])
                     continue
                 try:
-                    completions.append(agent.run(prompt))
+                    response = agent({"input": prompt}, intermediate_steps=intermediate_steps)
+                    completions.append([response['output'], response['intermediate_steps']])
+
                 except Exception as e:
-                    completions.append(f'agent failed with error:\n{str(e)[:50]}...')
-            return [c for c in completions]
+                    completions.append([f'agent failed with error:\n{str(e)[:50]}...', None])
+            return completions
 
         completion = _completion(agent, prompts)
 
         # add null completion for empty prompts
         for i in sorted(empty_prompt_ids):
-            completion.insert(i, None)
+            completion.insert(i, [None, None])
 
-        pred_df = pd.DataFrame(completion, columns=[args['target']])
+        pred_df = pd.DataFrame(completion, columns=[args['target'], 'intermediate_steps'])
 
         return pred_df
 
