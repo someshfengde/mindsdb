@@ -503,6 +503,10 @@ class SQLQuery():
 
         database = None if self.session.database == '' else self.session.database.lower()
 
+        for database in databases:
+            if database['engine'] == 'web':
+                database['class'] = 'api'
+
         self.predictor_metadata = predictor_metadata
         self.planner = query_planner.QueryPlanner(
             self.query,
